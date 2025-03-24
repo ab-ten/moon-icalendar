@@ -1,0 +1,78 @@
+name: 月齢カレンダー生成＆リリース
+
+on:
+  workflow_dispatch:  # 手動実行用
+    inputs:
+      year:
+        description: '生成する年（空白の場合は現在の年）'
+        required: false
+        type: string
+  schedule:
+    - cron: '0 0 1 12 *'  # 毎年12月1日に実行
+
+jobs:
+  generate-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # リリース作成に必要な権限
+      id-token: write  # attest-build-provenance で必要
+      attestations: write  # attest-build-provenance で必要
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Pythonセットアップ
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: 現在の年を取得
+        id: get-current-year
+        run: echo "current_year=$(date +%Y)" >> $GITHUB_OUTPUT
+
+      - name: 翌年を計算
+        id: get-next-year
+        run: echo "next_year=$(( $(date +%Y) + 1 ))" >> $GITHUB_OUTPUT
+
+      - name: 対象年を決定
+        id: determine-year
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            # スケジュール実行の場合は翌年のカレンダーを生成
+            echo "target_year=${{ steps.get-next-year.outputs.next_year }}" >> $GITHUB_OUTPUT
+          elif [ -n "${{ github.event.inputs.year }}" ]; then
+            # 手動実行で年が指定されている場合はその年を使用
+            echo "target_year=${{ github.event.inputs.year }}" >> $GITHUB_OUTPUT
+          else
+            # 手動実行で年が指定されていない場合は現在の年を使用
+            echo "target_year=${{ steps.get-current-year.outputs.current_year }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 月齢カレンダー生成
+        id: generate-calendar
+        run: |
+          python moon-icalendar-gen.py ${{ steps.determine-year.outputs.target_year }}
+          echo "calendar_file=moon_phases_${{ steps.determine-year.outputs.target_year }}.ics" >> $GITHUB_OUTPUT
+
+      - name: provenance 作成
+        uses: actions/attest-build-provenance@v2
+        id: attest-provenance
+        with:
+          subject-path: ${{ steps.generate-calendar.outputs.calendar_file }}
+
+      - name: 証明書バンドルリネーム
+        run: cp "$ATTESTATION" "${{ steps.generate-calendar.outputs.calendar_file }}.sigstore"
+        env:
+          ATTESTATION: "${{ steps.attest-provenance.outputs.bundle-path }}"
+
+      - name: リリース作成
+        # 同じリリースがすでに存在していたらエラーにする
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          YEAR: ${{ steps.determine-year.outputs.target_year }}
+        run: |
+          gh release create "release-${YEAR}" \
+            --title "${YEAR}年月齢カレンダー" \
+            --notes "月齢カレンダー ${YEAR}年版" \
+            "${{ steps.generate-calendar.outputs.calendar_file }}" \
+            "${{ steps.generate-calendar.outputs.calendar_file }}.sigstore"
